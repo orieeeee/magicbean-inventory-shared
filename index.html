@@ -1,0 +1,494 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>재고관리 (Supabase, Single‑File)</title>
+  <meta name="description" content="Magic Bean Games inventory manager — single file app using Supabase" />
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script>
+    // Tailwind config (optional – slightly nicer defaults)
+    tailwind.config = {
+      theme: {
+        extend: {
+          fontFamily: { sans: ["Inter", "Noto Sans KR", "ui-sans-serif", "system-ui"] },
+        }
+      }
+    }
+  </script>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=Noto+Sans+KR:wght@300;400;500;700;900&display=swap" rel="stylesheet">
+  <style>
+    /* Make dialog look nice across browsers */
+    dialog::backdrop { background: rgba(0,0,0,.3); }
+    [data-hidden] { display: none !important; }
+  </style>
+  <!--
+  ======================================================================
+  MAGIC BEAN – INVENTORY (Single HTML file, Supabase, GH Pages ready)
+  ======================================================================
+  1) Supabase 설정 (아래 CONFIG에 URL/ANON_KEY 입력)
+     - Project URL: https://YOUR-PROJECT.supabase.co
+     - anon key: Settings > API > Project API Keys > anon public
+
+  2) 데이터베이스 스키마 (SQL editor에 실행)
+     -- 제품 테이블
+     create table if not exists public.products (
+       id uuid primary key default gen_random_uuid(),
+       sku text unique not null,
+       name text not null,
+       category text not null,
+       price numeric(12,2) not null default 0,
+       stock integer not null default 0,
+       note text,
+       created_at timestamp with time zone default now(),
+       updated_at timestamp with time zone default now()
+     );
+     -- 카테고리 테이블 (필수는 아니지만 UI용)
+     create table if not exists public.categories (
+       id bigserial primary key,
+       name text unique not null,
+       created_at timestamp with time zone default now()
+     );
+     -- Updated at 트리거
+     create extension if not exists pgcrypto;
+     create or replace function public.set_updated_at()
+     returns trigger language plpgsql as $$ begin new.updated_at = now(); return new; end; $$;
+     drop trigger if exists t_products_updated on public.products;
+     create trigger t_products_updated
+       before update on public.products
+       for each row execute procedure public.set_updated_at();
+
+  3) 인증: 이메일/비밀번호 (GoTrue) 사용.
+     - Authentication > Providers > Email: ON
+     - Authentication > Policies: 아래 RLS로 보호
+
+  4) RLS 정책 (익명은 읽기만, 로그인 사용자만 쓰기)
+     -- products
+     alter table public.products enable row level security;
+     create policy "products_read_all" on public.products for select using (true);
+     create policy "products_write_by_auth" on public.products for all using (auth.role() = 'authenticated') with check (auth.role() = 'authenticated');
+     -- categories
+     alter table public.categories enable row level security;
+     create policy "categories_read_all" on public.categories for select using (true);
+     create policy "categories_write_by_auth" on public.categories for all using (auth.role() = 'authenticated') with check (auth.role() = 'authenticated');
+
+  5) GitHub Pages 배포: 이 파일을 repo 루트(또는 /docs)에 두고 Pages 설정.
+     - .html 하나로 동작. Vite/빌드 불필요, 로컬스토리지 미사용.
+
+  6) 사용법 요약
+     - 상단 우측에서 로그인(이메일/비번) → 쓰기 가능.
+     - 카테고리 바에서 필터/추가/삭제.
+     - [+ 제품]으로 생성, 연필 아이콘으로 수정, X로 삭제.
+     - 검색/정렬/페이지네이션 지원.
+
+  ======================================================================
+  -->
+</head>
+<body class="bg-slate-50 text-slate-800 min-h-screen">
+  <header class="sticky top-0 z-40 bg-white/90 backdrop-blur border-b border-slate-200">
+    <div class="max-w-6xl mx-auto px-4 py-3 flex items-center justify-between gap-4">
+      <div class="flex items-center gap-3">
+        <div class="h-8 w-8 rounded-xl bg-slate-900 text-white grid place-items-center font-bold">MB</div>
+        <div>
+          <h1 class="text-lg font-semibold leading-tight">재고관리</h1>
+          <p class="text-xs text-slate-500">Supabase · 공유 데이터 · GH Pages</p>
+        </div>
+      </div>
+      <div class="flex items-center gap-2">
+        <div id="authBox" class="flex items-center gap-2"></div>
+      </div>
+    </div>
+  </header>
+
+  <main class="max-w-6xl mx-auto px-4 py-6 space-y-6">
+    <!-- Controls Row -->
+    <section class="flex flex-wrap items-center gap-2">
+      <div class="relative">
+        <input id="q" type="search" placeholder="검색: 이름/코드/메모" class="w-72 max-w-[80vw] rounded-xl border border-slate-300 bg-white px-4 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-slate-400" />
+        <button id="btnClearQ" class="absolute right-1 top-1.5 rounded-lg px-2 py-1 text-xs text-slate-500 hover:bg-slate-100">지우기</button>
+      </div>
+      <select id="sort" class="rounded-xl border border-slate-300 bg-white px-3 py-2 text-sm">
+        <option value="created_at.desc">최신순</option>
+        <option value="created_at.asc">오래된순</option>
+        <option value="name.asc">이름 A→Z</option>
+        <option value="name.desc">이름 Z→A</option>
+        <option value="stock.desc">재고 높은순</option>
+        <option value="stock.asc">재고 낮은순</option>
+        <option value="price.desc">가격 높은순</option>
+        <option value="price.asc">가격 낮은순</option>
+      </select>
+      <button id="btnNew" class="ml-auto rounded-xl bg-slate-900 text-white px-4 py-2 text-sm font-medium disabled:opacity-40">+ 제품</button>
+    </section>
+
+    <!-- Category Bar -->
+    <section>
+      <div class="flex items-center gap-2 overflow-x-auto pb-2" id="catBar">
+        <!-- dynamic chips here -->
+      </div>
+      <div class="flex items-center gap-2 mt-2">
+        <button id="btnAddCat" class="rounded-lg border border-slate-300 px-3 py-1.5 text-xs hover:bg-slate-100">+ 카테고리</button>
+        <button id="btnDelCatMode" class="rounded-lg border border-rose-300 text-rose-700 px-3 py-1.5 text-xs hover:bg-rose-50">카테고리 삭제 모드</button>
+      </div>
+    </section>
+
+    <!-- Table -->
+    <section class="bg-white rounded-2xl shadow-sm border border-slate-200">
+      <div class="overflow-x-auto">
+        <table class="min-w-full text-sm">
+          <thead class="bg-slate-50 sticky top-[57px]">
+            <tr class="text-slate-600">
+              <th class="px-4 py-3 text-left font-medium">제품명</th>
+              <th class="px-3 py-3 text-left font-medium">카테고리</th>
+              <th class="px-3 py-3 text-right font-medium">가격</th>
+              <th class="px-3 py-3 text-right font-medium">재고</th>
+              <th class="px-3 py-3 text-left font-medium">코드</th>
+              <th class="px-3 py-3 text-left font-medium">메모</th>
+              <th class="px-3 py-3 text-right font-medium w-24">작업</th>
+            </tr>
+          </thead>
+          <tbody id="rows"></tbody>
+        </table>
+      </div>
+      <div class="flex items-center justify-between p-3 border-t border-slate-200">
+        <div class="text-xs text-slate-500" id="countInfo">–</div>
+        <div class="flex items-center gap-2">
+          <button id="prev" class="rounded-lg border border-slate-300 px-3 py-1.5 text-sm disabled:opacity-40">이전</button>
+          <span id="page" class="text-sm w-10 text-center">1</span>
+          <button id="next" class="rounded-lg border border-slate-300 px-3 py-1.5 text-sm disabled:opacity-40">다음</button>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <!-- Product Modal -->
+  <dialog id="dlg">
+    <form method="dialog" class="w-[90vw] max-w-xl">
+      <div class="bg-white rounded-2xl shadow-xl border border-slate-200 overflow-hidden">
+        <div class="px-5 py-4 border-b border-slate-200 flex items-center justify-between">
+          <h2 class="font-semibold" id="dlgTitle">제품 추가</h2>
+          <button type="button" id="dlgClose" class="rounded-lg px-2 py-1 text-slate-500 hover:bg-slate-100">닫기</button>
+        </div>
+        <div class="p-5 grid grid-cols-2 gap-4">
+          <input type="hidden" id="f_id" />
+          <div class="col-span-2">
+            <label class="block text-sm mb-1">제품명</label>
+            <input id="f_name" class="w-full rounded-xl border border-slate-300 px-3 py-2" required />
+          </div>
+          <div>
+            <label class="block text-sm mb-1">카테고리</label>
+            <input id="f_category" list="catList" class="w-full rounded-xl border border-slate-300 px-3 py-2" required />
+            <datalist id="catList"></datalist>
+          </div>
+          <div>
+            <label class="block text-sm mb-1">제품코드 (SKU)</label>
+            <input id="f_sku" class="w-full rounded-xl border border-slate-300 px-3 py-2" required />
+          </div>
+          <div>
+            <label class="block text-sm mb-1">가격</label>
+            <input id="f_price" type="number" step="0.01" class="w-full rounded-xl border border-slate-300 px-3 py-2" value="0" />
+          </div>
+          <div>
+            <label class="block text-sm mb-1">재고</label>
+            <input id="f_stock" type="number" class="w-full rounded-xl border border-slate-300 px-3 py-2" value="0" />
+          </div>
+          <div class="col-span-2">
+            <label class="block text-sm mb-1">메모</label>
+            <textarea id="f_note" rows="3" class="w-full rounded-xl border border-slate-300 px-3 py-2"></textarea>
+          </div>
+        </div>
+        <div class="px-5 py-4 border-t border-slate-200 flex items-center justify-end gap-2">
+          <button type="button" id="btnSave" class="rounded-xl bg-slate-900 text-white px-4 py-2 text-sm font-medium">저장</button>
+        </div>
+      </div>
+    </form>
+  </dialog>
+
+  <!-- Icons -->
+  <template id="tpl-pencil">
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" class="w-4 h-4"><path d="M21.731 2.269a2.625 2.625 0 0 0-3.712 0L8.672 11.616a6.003 6.003 0 0 0-1.39 2.243l-.58 1.741a.75.75 0 0 0 .948.948l1.74-.58a6.004 6.004 0 0 0 2.244-1.39l9.347-9.347a2.625 2.625 0 0 0 0-3.712Z"/><path d="M5.73 7.5a2.25 2.25 0 0 0-2.25 2.25v8.25A2.25 2.25 0 0 0 5.73 20.25h8.25a2.25 2.25 0 0 0 2.25-2.25v-3.995a.75.75 0 0 0-1.5 0v3.995a.75.75 0 0 1-.75.75H5.73a.75.75 0 0 1-.75-.75V9.75a.75.75 0 0 1 .75-.75h3.995a.75.75 0 0 0 0-1.5H5.73Z"/></svg>
+  </template>
+  <template id="tpl-x">
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" class="w-4 h-4"><path fill-rule="evenodd" d="M5.47 5.47a.75.75 0 0 1 1.06 0L12 10.94l5.47-5.47a.75.75 0 1 1 1.06 1.06L13.06 12l5.47 5.47a.75.75 0 1 1-1.06 1.06L12 13.06l-5.47 5.47a.75.75 0 0 1-1.06-1.06L10.94 12 5.47 6.53a.75.75 0 0 1 0-1.06Z" clip-rule="evenodd"/></svg>
+  </template>
+
+  <!-- Supabase JS -->
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+  <script>
+    // ========================= CONFIG =========================
+    const SUPABASE_URL = "https://ywuwxxcgpmofbyilbxkh.supabase.co"; // ← 변경
+    const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Inl3dXd4eGNncG1vZmJ5aWxieGtoIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjIzNDM0NDAsImV4cCI6MjA3NzkxOTQ0MH0.iF5-AwVmgJsC1MoJwM_BKgPo-AlHfzT5fkzttoZAjvU";        // ← 변경
+    const PAGE_SIZE = 20;
+
+    // ==========================================================
+    const supabase = supabase_js.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+
+    // State
+    let state = {
+      q: "",
+      sort: { col: "created_at", dir: "desc" },
+      page: 1,
+      category: "ALL",
+      categories: [],
+      delCatMode: false,
+      user: null,
+    };
+
+    const $ = (sel, el=document) => el.querySelector(sel);
+    const $$ = (sel, el=document) => Array.from(el.querySelectorAll(sel));
+
+    const authBox = document.getElementById('authBox');
+    function renderAuthBox() {
+      authBox.innerHTML = '';
+      if (state.user) {
+        const email = document.createElement('span');
+        email.className = 'text-sm text-slate-600';
+        email.textContent = state.user.email;
+        const btn = document.createElement('button');
+        btn.className = 'rounded-xl border border-slate-300 px-3 py-1.5 text-sm';
+        btn.textContent = '로그아웃';
+        btn.onclick = async () => { await supabase.auth.signOut(); };
+        authBox.append(email, btn);
+        document.getElementById('btnNew').disabled = false;
+        document.getElementById('btnAddCat').disabled = false;
+      } else {
+        const email = document.createElement('input');
+        email.placeholder = '이메일';
+        email.className = 'rounded-xl border border-slate-300 px-2 py-1.5 text-sm';
+        const pw = document.createElement('input');
+        pw.type = 'password';
+        pw.placeholder = '비밀번호';
+        pw.className = 'rounded-xl border border-slate-300 px-2 py-1.5 text-sm';
+        const btn = document.createElement('button');
+        btn.className = 'rounded-xl bg-slate-900 text-white px-3 py-1.5 text-sm';
+        btn.textContent = '로그인/가입';
+        btn.onclick = async () => {
+          if (!email.value || !pw.value) return alert('이메일/비밀번호 입력');
+          const { data, error } = await supabase.auth.signInWithPassword({ email: email.value, password: pw.value });
+          if (error && error.message.includes('Invalid login credentials')) {
+            const { error: sErr } = await supabase.auth.signUp({ email: email.value, password: pw.value });
+            if (sErr) return alert('가입 오류: ' + sErr.message);
+            alert('가입 완료. 메일 확인이 필요할 수 있습니다.');
+          } else if (error) {
+            alert('로그인 오류: ' + error.message);
+          }
+        };
+        authBox.append(email, pw, btn);
+        document.getElementById('btnNew').disabled = true;
+        document.getElementById('btnAddCat').disabled = true;
+      }
+    }
+
+    supabase.auth.onAuthStateChange((_evt, session) => {
+      state.user = session?.user || null;
+      renderAuthBox();
+      renderRows(); // 버튼 권한 상태 갱신
+    });
+
+    // ===== Categories =====
+    async function loadCategories() {
+      const { data, error } = await supabase.from('categories').select('*').order('name', { ascending: true });
+      if (error) { console.error(error); return; }
+      state.categories = data || [];
+      renderCatBar();
+      fillCatDatalist();
+    }
+
+    function renderCatBar() {
+      const bar = document.getElementById('catBar');
+      bar.innerHTML = '';
+      const mkChip = (name) => {
+        const active = state.category === name;
+        const chip = document.createElement('button');
+        chip.className = `whitespace-nowrap rounded-full px-3 py-1.5 text-sm border ${active ? 'bg-slate-900 text-white border-slate-900' : 'bg-white border-slate-300 hover:bg-slate-100'}`;
+        chip.textContent = name === 'ALL' ? '전체' : name;
+        chip.onclick = () => { state.category = name; state.page = 1; renderRows(); renderCatBar(); };
+        if (state.delCatMode && name !== 'ALL') {
+          const x = document.createElement('span');
+          x.innerHTML = document.getElementById('tpl-x').innerHTML;
+          x.className = 'inline-flex ml-2 text-rose-600';
+          x.onclick = async (e) => {
+            e.stopPropagation();
+            if (!confirm(`카테고리 "${name}" 삭제? (제품의 category 값은 그대로 남습니다)`)) return;
+            const { error } = await supabase.from('categories').delete().eq('name', name);
+            if (error) return alert('삭제 실패: ' + error.message);
+            await loadCategories();
+          };
+          chip.appendChild(x);
+        }
+        return chip;
+      };
+      bar.append(mkChip('ALL'));
+      state.categories.forEach(c => bar.append(mkChip(c.name)));
+    }
+
+    function fillCatDatalist() {
+      const dl = document.getElementById('catList');
+      dl.innerHTML = '';
+      state.categories.forEach(c => {
+        const opt = document.createElement('option');
+        opt.value = c.name; dl.append(opt);
+      });
+    }
+
+    document.getElementById('btnAddCat').onclick = async () => {
+      const name = prompt('새 카테고리 이름?');
+      if (!name) return;
+      const { error } = await supabase.from('categories').insert({ name: name.trim() });
+      if (error) return alert('추가 실패: ' + error.message);
+      await loadCategories();
+    };
+
+    document.getElementById('btnDelCatMode').onclick = () => {
+      state.delCatMode = !state.delCatMode; renderCatBar();
+      document.getElementById('btnDelCatMode').classList.toggle('bg-rose-600');
+      document.getElementById('btnDelCatMode').classList.toggle('text-white');
+    };
+
+    // ===== Products =====
+    async function fetchProducts() {
+      const from = (state.page-1) * PAGE_SIZE;
+      const to = from + PAGE_SIZE - 1;
+      let q = supabase.from('products').select('*', { count: 'exact' });
+      if (state.q) {
+        const like = `%${state.q}%`;
+        q = q.or(`name.ilike.${like},sku.ilike.${like},note.ilike.${like}`);
+      }
+      if (state.category !== 'ALL') {
+        q = q.eq('category', state.category);
+      }
+      const [col, dir] = [state.sort.col, state.sort.dir];
+      q = q.order(col, { ascending: dir === 'asc' });
+      q = q.range(from, to);
+      const { data, error, count } = await q;
+      if (error) { console.error(error); alert('제품 불러오기 실패: ' + error.message); return { data: [], count: 0 }; }
+      return { data: data || [], count: count || 0 };
+    }
+
+    function fmtCurrency(n) { return new Intl.NumberFormat('ko-KR', { style:'currency', currency:'KRW' }).format(Number(n||0)); }
+
+    async function renderRows() {
+      const tbody = document.getElementById('rows');
+      tbody.innerHTML = '<tr><td colspan="7" class="px-4 py-6 text-center text-slate-500">불러오는 중…</td></tr>';
+      const { data, count } = await fetchProducts();
+      tbody.innerHTML = '';
+      if (!data.length) {
+        tbody.innerHTML = '<tr><td colspan="7" class="px-4 py-10 text-center text-slate-400">데이터가 없습니다</td></tr>';
+      }
+      data.forEach(row => {
+        const tr = document.createElement('tr');
+        tr.className = 'border-t border-slate-100 hover:bg-slate-50';
+        tr.innerHTML = `
+          <td class="px-4 py-2 font-medium">${row.name}</td>
+          <td class="px-3 py-2">${row.category}</td>
+          <td class="px-3 py-2 text-right">${fmtCurrency(row.price)}</td>
+          <td class="px-3 py-2 text-right ${row.stock <= 3 ? 'text-rose-600 font-semibold' : ''}">${row.stock}</td>
+          <td class="px-3 py-2 text-slate-500">${row.sku}</td>
+          <td class="px-3 py-2 text-slate-500">${row.note || ''}</td>
+          <td class="px-3 py-2">
+            <div class="flex items-center justify-end gap-2">
+              <button class="p-1 rounded hover:bg-slate-200" data-edit="${row.id}" title="수정">${document.getElementById('tpl-pencil').innerHTML}</button>
+              <button class="p-1 rounded hover:bg-rose-100 text-rose-700" data-del="${row.id}" title="삭제">${document.getElementById('tpl-x').innerHTML}</button>
+            </div>
+          </td>`;
+        tbody.appendChild(tr);
+      });
+
+      // Hook buttons
+      $$("[data-edit]").forEach(btn => btn.onclick = () => openEdit(btn.getAttribute('data-edit')));
+      $$("[data-del]").forEach(btn => btn.onclick = () => del(btn.getAttribute('data-del')));
+
+      // Pagination & count
+      document.getElementById('countInfo').textContent = `${count}개 항목`;
+      document.getElementById('page').textContent = state.page;
+      document.getElementById('prev').disabled = state.page <= 1;
+      document.getElementById('next').disabled = (state.page * PAGE_SIZE) >= count;
+
+      // Enable/disable row actions based on auth
+      const canWrite = !!state.user;
+      $$("[data-edit], [data-del]").forEach(b => b.disabled = !canWrite);
+      document.getElementById('btnNew').disabled = !canWrite;
+    }
+
+    async function openNew() {
+      $('#dlgTitle').textContent = '제품 추가';
+      $('#f_id').value = '';
+      $('#f_name').value = '';
+      $('#f_category').value = state.category === 'ALL' ? '' : state.category;
+      $('#f_sku').value = '';
+      $('#f_price').value = 0;
+      $('#f_stock').value = 0;
+      $('#f_note').value = '';
+      $('#dlg').showModal();
+    }
+
+    async function openEdit(id) {
+      const { data, error } = await supabase.from('products').select('*').eq('id', id).single();
+      if (error) return alert('불러오기 실패: ' + error.message);
+      $('#dlgTitle').textContent = '제품 수정';
+      $('#f_id').value = data.id;
+      $('#f_name').value = data.name;
+      $('#f_category').value = data.category;
+      $('#f_sku').value = data.sku;
+      $('#f_price').value = data.price;
+      $('#f_stock').value = data.stock;
+      $('#f_note').value = data.note || '';
+      $('#dlg').showModal();
+    }
+
+    async function save() {
+      const rec = {
+        name: $('#f_name').value.trim(),
+        category: $('#f_category').value.trim(),
+        sku: $('#f_sku').value.trim(),
+        price: Number($('#f_price').value || 0),
+        stock: parseInt($('#f_stock').value || '0'),
+        note: $('#f_note').value.trim() || null,
+      };
+      if (!rec.name || !rec.category || !rec.sku) return alert('필수값 누락');
+      const id = $('#f_id').value;
+      let res;
+      if (id) res = await supabase.from('products').update(rec).eq('id', id).select();
+      else res = await supabase.from('products').insert(rec).select();
+      if (res.error) return alert('저장 실패: ' + res.error.message);
+      $('#dlg').close();
+      // 카테고리 자동 등록
+      if (rec.category && !state.categories.some(c => c.name === rec.category)) {
+        await supabase.from('categories').insert({ name: rec.category }).catch(()=>{});
+        await loadCategories();
+      }
+      await renderRows();
+    }
+
+    async function del(id) {
+      if (!confirm('정말 삭제할까요?')) return;
+      const { error } = await supabase.from('products').delete().eq('id', id);
+      if (error) return alert('삭제 실패: ' + error.message);
+      await renderRows();
+    }
+
+    // ===== Wire UI =====
+    document.getElementById('q').oninput = (e) => { state.q = e.target.value.trim(); state.page = 1; debounceRender(); };
+    document.getElementById('btnClearQ').onclick = () => { document.getElementById('q').value=''; state.q=''; state.page=1; renderRows(); };
+    document.getElementById('sort').onchange = (e) => {
+      const [col, dir] = e.target.value.split('.');
+      state.sort = { col, dir }; state.page = 1; renderRows();
+    };
+    document.getElementById('btnNew').onclick = openNew;
+    document.getElementById('prev').onclick = () => { state.page = Math.max(1, state.page-1); renderRows(); };
+    document.getElementById('next').onclick = () => { state.page = state.page+1; renderRows(); };
+    document.getElementById('dlgClose').onclick = () => $('#dlg').close();
+    document.getElementById('btnSave').onclick = save;
+
+    let t; function debounceRender(){ clearTimeout(t); t = setTimeout(renderRows, 250); }
+
+    // ===== Init =====
+    (async function init(){
+      renderAuthBox();
+      await loadCategories();
+      await renderRows();
+    })();
+  </script>
+</body>
+</html>
