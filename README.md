@@ -1,0 +1,1 @@
+# magicbean-inventory-shared
